@@ -1,7 +1,8 @@
 [Desktop Entry]
 Name=Atom
 Comment=<%= description %>
-Exec=<%= installDir %>/share/atom/atom %U
+GenericName=Text Editor
+Exec=<%= executable %> %U
 Icon=<%= iconName %>
 Type=Application
 StartupNotify=true

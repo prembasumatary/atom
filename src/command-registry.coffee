@@ -1,14 +1,11 @@
 {Emitter, Disposable, CompositeDisposable} = require 'event-kit'
-{specificity} = require 'clear-cut'
+{calculateSpecificity, validateSelector} = require 'clear-cut'
 _ = require 'underscore-plus'
 {$} = require './space-pen-extensions'
 
 SequenceCount = 0
-SpecificityCache = {}
 
-module.exports =
-
-# Experimental: Associates listener functions with commands in a
+# Public: Associates listener functions with commands in a
 # context-sensitive way using CSS selectors. You can access a global instance of
 # this class via `atom.commands`, and commands registered there will be
 # presented in the command palette.
@@ -20,6 +17,12 @@ module.exports =
 # listeners for command events directly to DOM nodes, you instead register
 # command event listeners globally on `atom.commands` and constrain them to
 # specific kinds of elements with CSS selectors.
+#
+# Command names must follow the `namespace:action` pattern, where `namespace`
+# will typically be the name of your package, and `action` describes the
+# behavior of your command. If either part consists of multiple words, these
+# must be separated by hyphens. E.g. `awesome-package:turn-it-up-to-eleven`.
+# All words should be lowercased.
 #
 # As the event bubbles upward through the DOM, all registered event listeners
 # with matching selectors are invoked in order of specificity. In the event of a
@@ -37,11 +40,10 @@ module.exports =
 # ```coffee
 # atom.commands.add 'atom-text-editor',
 #   'user:insert-date': (event) ->
-#     editor = $(this).view().getModel()
-#     # soon the above above line will be:
-#     # editor = @getModel()
+#     editor = @getModel()
 #     editor.insertText(new Date().toLocaleString())
 # ```
+module.exports =
 class CommandRegistry
   constructor: (@rootNode) ->
     @registeredCommands = {}
@@ -52,14 +54,16 @@ class CommandRegistry
   destroy: ->
     for commandName of @registeredCommands
       window.removeEventListener(commandName, @handleCommandEvent, true)
+    return
 
   # Public: Add one or more command listeners associated with a selector.
   #
   # ## Arguments: Registering One Command
   #
-  # * `selector` A {String} containing a CSS selector matching elements on which
-  #   you want to handle the commands. The `,` combinator is not currently
-  #   supported.
+  # * `target` A {String} containing a CSS selector or a DOM element. If you
+  #   pass a selector, the command will be globally associated with all matching
+  #   elements. The `,` combinator is not currently supported. If you pass a
+  #   DOM element, the command will be associated with just that element.
   # * `commandName` A {String} containing the name of a command you want to
   #   handle such as `user:insert-date`.
   # * `callback` A {Function} to call when the given command is invoked on an
@@ -70,9 +74,11 @@ class CommandRegistry
   #
   # ## Arguments: Registering Multiple Commands
   #
-  # * `selector` A {String} containing a CSS selector matching elements on which
-  #   you want to handle the commands. The `,` combinator is not currently
-  #   supported.
+  # * `target` A {String} containing a CSS selector or a DOM element. If you
+  #   pass a selector, the commands will be globally associated with all
+  #   matching elements. The `,` combinator is not currently supported.
+  #   If you pass a DOM element, the command will be associated with just that
+  #   element.
   # * `commands` An {Object} mapping command names like `user:insert-date` to
   #   listener {Function}s.
   #
@@ -86,7 +92,11 @@ class CommandRegistry
         disposable.add @add(target, commandName, callback)
       return disposable
 
+    if typeof callback isnt 'function'
+      throw new Error("Can't register a command with non-function callback.")
+
     if typeof target is 'string'
+      validateSelector(target)
       @addSelectorBasedListener(target, commandName, callback)
     else
       @addInlineListener(target, commandName, callback)
@@ -131,25 +141,26 @@ class CommandRegistry
   #  * `jQuery` Present if the command was registered with the legacy
   #    `$::command` method.
   findCommands: ({target}) ->
+    commandNames = new Set
     commands = []
     currentTarget = target
     loop
+      for name, listeners of @inlineListenersByCommandName
+        if listeners.has(currentTarget) and not commandNames.has(name)
+          commandNames.add(name)
+          commands.push({name, displayName: _.humanizeEventName(name)})
+
       for commandName, listeners of @selectorBasedListenersByCommandName
         for listener in listeners
           if currentTarget.webkitMatchesSelector?(listener.selector)
-            commands.push
-              name: commandName
-              displayName: _.humanizeEventName(commandName)
+            unless commandNames.has(commandName)
+              commandNames.add(commandName)
+              commands.push
+                name: commandName
+                displayName: _.humanizeEventName(commandName)
 
-      break if currentTarget is @rootNode
-      currentTarget = currentTarget.parentNode
-      break unless currentTarget?
-
-    for name, displayName of $(target).events() when displayName
-      commands.push({name, displayName, jQuery: true})
-
-    for name, displayName of $(window).events() when displayName
-      commands.push({name, displayName, jQuery: true})
+      break if currentTarget is window
+      currentTarget = currentTarget.parentNode ? window
 
     commands
 
@@ -184,6 +195,7 @@ class CommandRegistry
     @selectorBasedListenersByCommandName = {}
     for commandName, listeners of snapshot
       @selectorBasedListenersByCommandName[commandName] = listeners.slice()
+    return
 
   handleCommandEvent: (originalEvent) =>
     propagationStopped = false
@@ -236,7 +248,7 @@ class CommandRegistry
 
 class SelectorBasedListener
   constructor: (@selector, @callback) ->
-    @specificity = (SpecificityCache[@selector] ?= specificity(@selector))
+    @specificity = calculateSpecificity(@selector)
     @sequenceNumber = SequenceCount++
 
   compare: (other) ->

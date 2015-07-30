@@ -32,7 +32,7 @@ module.exports = (grunt) ->
       packageJsonPath = path.join(appDir, 'package.json')
       packageJson = require(packageJsonPath)
       packageJson.version = version
-      packageJsonString = JSON.stringify(packageJson, null, 2)
+      packageJsonString = JSON.stringify(packageJson)
       fs.writeFileSync(packageJsonPath, packageJsonString)
 
       if process.platform is 'darwin'
@@ -46,7 +46,7 @@ module.exports = (grunt) ->
         strings =
           CompanyName: 'GitHub, Inc.'
           FileDescription: 'Atom'
-          LegalCopyright: 'Copyright (C) 2014 GitHub, Inc. All rights reserved'
+          LegalCopyright: 'Copyright (C) 2015 GitHub, Inc. All rights reserved'
           ProductName: 'Atom'
           ProductVersion: version
 

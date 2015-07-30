@@ -59,6 +59,8 @@ loadDependencies = (modulePath, rootPath, rootMetadata, moduleCache) ->
     if childMetadata?.version
       try
         mainPath = require.resolve(childPath)
+      catch error
+        mainPath = null
 
       if mainPath
         moduleCache.dependencies.push
@@ -104,6 +106,40 @@ loadFolderCompatibility = (modulePath, rootPath, rootMetadata, moduleCache) ->
     continue if rootPath is modulePath and rootMetadata.packageDependencies?.hasOwnProperty(path.basename(childPath))
 
     loadFolderCompatibility(childPath, rootPath, rootMetadata, moduleCache)
+
+  return
+
+loadExtensions = (modulePath, rootPath, rootMetadata, moduleCache) ->
+  fs = require 'fs-plus'
+  extensions = ['.js', '.coffee', '.json', '.node']
+  nodeModulesPath = path.join(rootPath, 'node_modules')
+
+  onFile = (filePath) ->
+    filePath = path.relative(rootPath, filePath)
+    segments = filePath.split(path.sep)
+    return if 'test' in segments
+    return if 'tests' in segments
+    return if 'spec' in segments
+    return if 'specs' in segments
+    return if segments.length > 1 and not (segments[0] in ['exports', 'lib', 'node_modules', 'src', 'static', 'vendor'])
+
+    extension = path.extname(filePath)
+    if extension in extensions
+      moduleCache.extensions[extension] ?= []
+      moduleCache.extensions[extension].push(filePath)
+
+  onDirectory = (childPath) ->
+    # Don't include extensions from bundled packages
+    # These are generated and stored in the package's own metadata cache
+    if rootMetadata.name is 'atom'
+      parentPath = path.dirname(childPath)
+      if parentPath is nodeModulesPath
+        packageName = path.basename(childPath)
+        return false if rootMetadata.packageDependencies?.hasOwnProperty(packageName)
+
+    true
+
+  fs.traverseTreeSync(rootPath, onFile, onDirectory)
 
   return
 
@@ -158,13 +194,13 @@ resolveModulePath = (relativePath, parentModule) ->
   return
 
 registerBuiltins = (devMode) ->
-  if devMode
+  if devMode or not cache.resourcePath.startsWith("#{process.resourcesPath}#{path.sep}")
     fs = require 'fs-plus'
     atomCoffeePath = path.join(cache.resourcePath, 'exports', 'atom.coffee')
     cache.builtins.atom = atomCoffeePath if fs.isFileSync(atomCoffeePath)
   cache.builtins.atom ?= path.join(cache.resourcePath, 'exports', 'atom.js')
 
-  atomShellRoot = path.join(process.resourcesPath, 'atom')
+  atomShellRoot = path.join(process.resourcesPath, 'atom.asar')
 
   commonRoot = path.join(atomShellRoot, 'common', 'api', 'lib')
   commonBuiltins = ['callbacks-registry', 'clipboard', 'crash-reporter', 'screen', 'shell']
@@ -215,10 +251,12 @@ exports.create = (modulePath) ->
   moduleCache =
     version: 1
     dependencies: []
+    extensions: {}
     folders: []
 
   loadDependencies(modulePath, modulePath, metadata, moduleCache)
   loadFolderCompatibility(modulePath, modulePath, metadata, moduleCache)
+  loadExtensions(modulePath, modulePath, metadata, moduleCache)
 
   metadata._atomModuleCache = moduleCache
   fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2))
@@ -265,11 +303,10 @@ exports.add = (directoryPath, metadata) ->
       else
         cache.folders[directoryPath] = entry.dependencies
 
-  if directoryPath is cache.resourcePath
-    for extension, paths of cacheToAdd.extensions
-      cache.extensions[extension] ?= new Set()
-      for filePath in paths
-        cache.extensions[extension].add("#{directoryPath}#{path.sep}#{filePath}")
+  for extension, paths of cacheToAdd.extensions
+    cache.extensions[extension] ?= new Set()
+    for filePath in paths
+      cache.extensions[extension].add("#{directoryPath}#{path.sep}#{filePath}")
 
   return
 

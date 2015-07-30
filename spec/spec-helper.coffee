@@ -9,16 +9,22 @@ _ = require 'underscore-plus'
 fs = require 'fs-plus'
 Grim = require 'grim'
 KeymapManager = require '../src/keymap-extensions'
-{$, WorkspaceView, Workspace} = require 'atom'
+
+# FIXME: Remove jquery from this
+{$} = require '../src/space-pen-extensions'
+
 Config = require '../src/config'
 {Point} = require 'text-buffer'
 Project = require '../src/project'
+Workspace = require '../src/workspace'
+ServiceHub = require 'service-hub'
 TextEditor = require '../src/text-editor'
 TextEditorView = require '../src/text-editor-view'
+TextEditorElement = require '../src/text-editor-element'
 TokenizedBuffer = require '../src/tokenized-buffer'
 TextEditorComponent = require '../src/text-editor-component'
 pathwatcher = require 'pathwatcher'
-clipboard = require 'clipboard'
+clipboard = require '../src/safe-clipboard'
 
 atom.themes.loadBaseStylesheets()
 atom.themes.requireStylesheet '../static/jasmine'
@@ -43,10 +49,28 @@ Object.defineProperty document, 'title',
   get: -> documentTitle
   set: (title) -> documentTitle = title
 
+Set.prototype.jasmineToString = ->
+  result = "Set {"
+  first = true
+  @forEach (element) ->
+    result += ", " unless first
+    result += element.toString()
+  first = false
+  result + "}"
+
+Set.prototype.isEqual = (other) ->
+  if other instanceof Set
+    return false if @size isnt other.size
+    values = @values()
+    until (next = values.next()).done
+      return false unless other.has(next.value)
+    true
+  else
+    false
+
 jasmine.getEnv().addEqualityTester(_.isEqual) # Use underscore's definition of equality for toEqual assertions
 
-if process.platform is 'win32' and process.env.JANKY_SHA1
-  # Use longer timeout on Windows CI
+if process.env.CI
   jasmine.getEnv().defaultTimeoutInterval = 60000
 else
   jasmine.getEnv().defaultTimeoutInterval = 5000
@@ -64,26 +88,33 @@ if specDirectory
     specPackageName = JSON.parse(fs.readFileSync(path.join(specPackagePath, 'package.json')))?.name
   specProjectPath = path.join(specDirectory, 'fixtures')
 
-isCoreSpec = specDirectory == fs.realpathSync(__dirname)
+isCoreSpec = specDirectory is fs.realpathSync(__dirname)
 
 beforeEach ->
-  Grim.clearDeprecations() if isCoreSpec
   $.fx.off = true
   documentTitle = null
   projectPath = specProjectPath ? path.join(@specDirectory, 'fixtures')
+  atom.packages.serviceHub = new ServiceHub
   atom.project = new Project(paths: [projectPath])
   atom.workspace = new Workspace()
   atom.keymaps.keyBindings = _.clone(keyBindingsToRestore)
   atom.commands.restoreSnapshot(commandsToRestore)
   atom.styles.restoreSnapshot(styleElementsToRestore)
+  atom.views.clearDocumentRequests()
+
+  atom.workspaceViewParentSelector = '#jasmine-content'
 
   window.resetTimeouts()
+  spyOn(_._, "now").andCallFake -> window.now
+  spyOn(window, "setTimeout").andCallFake window.fakeSetTimeout
+  spyOn(window, "clearTimeout").andCallFake window.fakeClearTimeout
+
   atom.packages.packageStates = {}
 
   serializedWindowState = null
 
   spyOn(atom, 'saveSync')
-  atom.syntax.clearGrammarOverrides()
+  atom.grammars.clearGrammarOverrides()
 
   spy = spyOn(atom.packages, 'resolvePackagePath').andCallFake (packageName) ->
     if specPackageName and packageName is specPackageName
@@ -96,9 +127,9 @@ beforeEach ->
   spyOn(atom.menu, 'sendToBrowserProcess')
 
   # reset config before each spec; don't load or save from/to `config.json`
+  spyOn(Config::, 'load')
+  spyOn(Config::, 'save')
   config = new Config({resourcePath, configDirPath: atom.getConfigDirPath()})
-  spyOn(config, 'load')
-  spyOn(config, 'save')
   atom.config = config
   atom.loadConfig()
   config.set "core.destroyEmptyPanes", false
@@ -107,16 +138,16 @@ beforeEach ->
   config.set "editor.autoIndent", false
   config.set "core.disabledPackages", ["package-that-throws-an-exception",
     "package-with-broken-package-json", "package-with-broken-keymap"]
+  config.set "editor.useShadowDOM", true
+  advanceClock(1000)
+  window.setTimeout.reset()
   config.load.reset()
   config.save.reset()
 
   # make editor display updates synchronous
-  spyOn(TextEditorView.prototype, 'requestDisplayUpdate').andCallFake -> @updateDisplay()
-  TextEditorComponent.performSyncUpdates = true
+  TextEditorElement::setUpdatedSynchronously(true)
 
   spyOn(atom, "setRepresentedFilename")
-  spyOn(window, "setTimeout").andCallFake window.fakeSetTimeout
-  spyOn(window, "clearTimeout").andCallFake window.fakeClearTimeout
   spyOn(pathwatcher.File.prototype, "detectResurrectionAfterDelay").andCallFake -> @detectResurrection()
   spyOn(TextEditor.prototype, "shouldPromptToSave").andReturn false
 
@@ -128,15 +159,19 @@ beforeEach ->
   spyOn(clipboard, 'writeText').andCallFake (text) -> clipboardContent = text
   spyOn(clipboard, 'readText').andCallFake -> clipboardContent
 
+  spyOn(atom.packages, 'uninstallAutocompletePlus')
+
   addCustomMatchers(this)
 
 afterEach ->
   atom.packages.deactivatePackages()
   atom.menu.template = []
   atom.contextMenu.clear()
+  atom.notifications.clear()
 
-  atom.workspaceView?.remove?()
-  atom.workspaceView = null
+  atom.workspace?.destroy()
+  atom.workspace = null
+  atom.__workspaceView = null
   delete atom.state.workspace
 
   atom.project?.destroy()
@@ -150,7 +185,6 @@ afterEach ->
 
   jasmine.unspy(atom, 'saveSync')
   ensureNoPathSubscriptions()
-  atom.syntax.clearObservers()
   waits(0) # yield to ui thread to make screen update more frequently
 
 ensureNoPathSubscriptions = ->
@@ -191,6 +225,22 @@ jasmine.unspy = (object, methodName) ->
   throw new Error("Not a spy") unless object[methodName].hasOwnProperty('originalValue')
   object[methodName] = object[methodName].originalValue
 
+jasmine.attachToDOM = (element) ->
+  jasmineContent = document.querySelector('#jasmine-content')
+  jasmineContent.appendChild(element) unless jasmineContent.contains(element)
+
+deprecationsSnapshot = null
+jasmine.snapshotDeprecations = ->
+  deprecationsSnapshot = _.clone(Grim.deprecations)
+
+jasmine.restoreDeprecationsSnapshot = ->
+  Grim.deprecations = deprecationsSnapshot
+
+jasmine.useRealClock = ->
+  jasmine.unspy(window, 'setTimeout')
+  jasmine.unspy(window, 'clearTimeout')
+  jasmine.unspy(_._, 'now')
+
 addCustomMatchers = (spec) ->
   spec.addMatchers
     toBeInstanceOf: (expected) ->
@@ -205,7 +255,7 @@ addCustomMatchers = (spec) ->
       else
         notText = if @isNot then " not" else ""
         this.message = => "Expected object with length #{@actual.length} to#{notText} have length #{expected}"
-        @actual.length == expected
+        @actual.length is expected
 
     toExistOnDisk: (expected) ->
       notText = this.isNot and " not" or ""
@@ -220,13 +270,13 @@ addCustomMatchers = (spec) ->
       @message = -> return "Expected element '" + @actual + "' or its descendants" + notText + " to have focus."
       element = @actual
       element = element.get(0) if element.jquery
-      element.webkitMatchesSelector(":focus") or element.querySelector(":focus")
+      element is document.activeElement or element.contains(document.activeElement)
 
     toShow: ->
       notText = if @isNot then " not" else ""
       element = @actual
       element = element.get(0) if element.jquery
-      @message = -> return "Expected element '#{element}' or its descendants #{notText} to show."
+      @message = -> return "Expected element '#{element}' or its descendants#{notText} to show."
       element.style.display in ['block', 'inline-block', 'static', 'fixed']
 
 window.keyIdentifierForKey = (key) ->
@@ -244,7 +294,7 @@ window.keydownEvent = (key, properties={}) ->
   originalEventProperties.cmd = properties.metaKey
   originalEventProperties.target = properties.target?[0] ? properties.target
   originalEventProperties.which = properties.which
-  originalEvent = KeymapManager.keydownEvent(key, originalEventProperties)
+  originalEvent = KeymapManager.buildKeydownEvent(key, originalEventProperties)
   properties = $.extend({originalEvent}, properties)
   $.Event("keydown", properties)
 
@@ -268,7 +318,7 @@ window.mousemoveEvent = (properties={}) ->
 
 window.waitsForPromise = (args...) ->
   if args.length > 1
-    { shouldReject, timeout } = args[0]
+    {shouldReject, timeout} = args[0]
   else
     shouldReject = false
   fn = _.last(args)
@@ -276,14 +326,14 @@ window.waitsForPromise = (args...) ->
   window.waitsFor timeout, (moveOn) ->
     promise = fn()
     if shouldReject
-      promise.fail(moveOn)
-      promise.done ->
+      promise.catch.call(promise, moveOn)
+      promise.then ->
         jasmine.getEnv().currentSpec.fail("Expected promise to be rejected, but it was resolved")
         moveOn()
     else
-      promise.done(moveOn)
-      promise.fail (error) ->
-        jasmine.getEnv().currentSpec.fail("Expected promise to be resolved, but it was rejected with #{jasmine.pp(error)}")
+      promise.then(moveOn)
+      promise.catch.call promise, (error) ->
+        jasmine.getEnv().currentSpec.fail("Expected promise to be resolved, but it was rejected with: #{error?.message} #{jasmine.pp(error)}")
         moveOn()
 
 window.resetTimeouts = ->
@@ -299,7 +349,7 @@ window.fakeSetTimeout = (callback, ms) ->
   id
 
 window.fakeClearTimeout = (idToClear) ->
-  window.timeouts = window.timeouts.filter ([id]) -> id != idToClear
+  window.timeouts = window.timeouts.filter ([id]) -> id isnt idToClear
 
 window.fakeSetInterval = (callback, ms) ->
   id = ++window.intervalCount
@@ -329,7 +379,7 @@ window.pagePixelPositionForPoint = (editorView, point) ->
   point = Point.fromObject point
   top = editorView.renderedLines.offset().top + point.row * editorView.lineHeight
   left = editorView.renderedLines.offset().left + point.column * editorView.charWidth - editorView.renderedLines.scrollLeft()
-  { top, left }
+  {top, left}
 
 window.tokensText = (tokens) ->
   _.pluck(tokens, 'value').join('')
@@ -339,12 +389,8 @@ window.setEditorWidthInChars = (editorView, widthInChars, charWidth=editorView.c
   $(window).trigger 'resize' # update width of editor view's on-screen lines
 
 window.setEditorHeightInLines = (editorView, heightInLines, lineHeight=editorView.lineHeight) ->
-  if editorView.hasClass('react')
-    editorView.height(editorView.getEditor().getLineHeightInPixels() * heightInLines)
-    editorView.component?.measureHeightAndWidth()
-  else
-    editorView.height(lineHeight * heightInLines + editorView.renderedLines.position().top)
-    $(window).trigger 'resize' # update editor view's on-screen lines
+  editorView.height(editorView.getEditor().getLineHeightInPixels() * heightInLines)
+  editorView.component?.measureDimensions()
 
 $.fn.resultOfTrigger = (type) ->
   event = $.Event(type)

@@ -4,7 +4,6 @@ Q = require 'q'
 _ = require 'underscore-plus'
 Delegator = require 'delegato'
 {deprecate, logDeprecationWarnings} = require 'grim'
-scrollbarStyle = require 'scrollbar-style'
 {$, $$, View} = require './space-pen-extensions'
 fs = require 'fs-plus'
 Workspace = require './workspace'
@@ -12,7 +11,7 @@ PaneView = require './pane-view'
 PaneContainerView = require './pane-container-view'
 TextEditor = require './text-editor'
 
-# Extended: The top-level view for the entire window. An instance of this class is
+# Deprecated: The top-level view for the entire window. An instance of this class is
 # available via the `atom.workspaceView` global.
 #
 # It is backed by a model object, an instance of {Workspace}, which is available
@@ -52,16 +51,17 @@ module.exports =
 class WorkspaceView extends View
   Delegator.includeInto(this)
 
-  @delegatesProperty 'fullScreen', 'destroyedItemUris', toProperty: 'model'
+  @delegatesProperty 'fullScreen', 'destroyedItemURIs', toProperty: 'model'
   @delegatesMethods 'open', 'openSync',
     'saveActivePaneItem', 'saveActivePaneItemAs', 'saveAll', 'destroyActivePaneItem',
     'destroyActivePane', 'increaseFontSize', 'decreaseFontSize', toProperty: 'model'
 
   constructor: (@element) ->
     unless @element?
-      return atom.workspace.getView(atom.workspace).__spacePenView
+      return atom.views.getView(atom.workspace).__spacePenView
     super
     @deprecateViewEvents()
+    @attachedEditorViews = new WeakSet
 
   setModel: (@model) ->
     @horizontal = @find('atom-workspace-axis.horizontal')
@@ -95,10 +95,17 @@ class WorkspaceView extends View
   # Returns a subscription object with an `.off` method that you can call to
   # unregister the callback.
   eachEditorView: (callback) ->
-    callback(editorView) for editorView in @getEditorViews()
-    attachedCallback = (e, editorView) ->
-      callback(editorView) unless editorView.mini
+    for editorView in @getEditorViews()
+      @attachedEditorViews.add(editorView)
+      callback(editorView)
+
+    attachedCallback = (e, editorView) =>
+      unless @attachedEditorViews.has(editorView)
+        @attachedEditorViews.add(editorView)
+        callback(editorView) unless editorView.mini
+
     @on('editor:attached', attachedCallback)
+
     off: => @off('editor:attached', attachedCallback)
 
   # Essential: Register a function to be called for every current and future
@@ -141,59 +148,36 @@ class WorkspaceView extends View
   Section: Adding elements to the workspace
   ###
 
-  # Essential: Prepend an element or view to the panels at the top of the
-  # workspace.
-  #
-  # * `element` jQuery object or DOM element
   prependToTop: (element) ->
+    deprecate 'Please use Workspace::addTopPanel() instead'
     @vertical.prepend(element)
 
-  # Essential: Append an element or view to the panels at the top of the workspace.
-  #
-  # * `element` jQuery object or DOM element
   appendToTop: (element) ->
+    deprecate 'Please use Workspace::addTopPanel() instead'
     @panes.before(element)
 
-  # Essential: Prepend an element or view to the panels at the bottom of the
-  # workspace.
-  #
-  # * `element` jQuery object or DOM element
   prependToBottom: (element) ->
+    deprecate 'Please use Workspace::addBottomPanel() instead'
     @panes.after(element)
 
-  # Essential: Append an element or view to the panels at the bottom of the
-  # workspace.
-  #
-  # * `element` jQuery object or DOM element
   appendToBottom: (element) ->
+    deprecate 'Please use Workspace::addBottomPanel() instead'
     @vertical.append(element)
 
-  # Essential: Prepend an element or view to the panels at the left of the
-  # workspace.
-  #
-  # * `element` jQuery object or DOM element
   prependToLeft: (element) ->
+    deprecate 'Please use Workspace::addLeftPanel() instead'
     @horizontal.prepend(element)
 
-  # Essential: Append an element or view to the panels at the left of the
-  # workspace.
-  #
-  # * `element` jQuery object or DOM element
   appendToLeft: (element) ->
+    deprecate 'Please use Workspace::addLeftPanel() instead'
     @vertical.before(element)
 
-  # Essential: Prepend an element or view to the panels at the right of the
-  # workspace.
-  #
-  # * `element` jQuery object or DOM element
   prependToRight: (element) ->
+    deprecate 'Please use Workspace::addRightPanel() instead'
     @vertical.after(element)
 
-  # Essential: Append an element or view to the panels at the right of the
-  # workspace.
-  #
-  # * `element` jQuery object or DOM element
   appendToRight: (element) ->
+    deprecate 'Please use Workspace::addRightPanel() instead'
     @horizontal.append(element)
 
   ###
@@ -237,7 +221,6 @@ class WorkspaceView extends View
     for editorElement in @panes.element.querySelectorAll('atom-pane > .item-views > atom-text-editor')
       $(editorElement).view()
 
-
   ###
   Section: Deprecated
   ###
@@ -252,7 +235,7 @@ class WorkspaceView extends View
         when 'cursor:moved'
           deprecate('Use TextEditor::onDidChangeCursorPosition instead')
         when 'editor:attached'
-          deprecate('Use TextEditor::onDidAddTextEditor instead')
+          deprecate('Use Workspace::onDidAddTextEditor instead')
         when 'editor:detached'
           deprecate('Use TextEditor::onDidDestroy instead')
         when 'editor:will-be-removed'

@@ -12,22 +12,18 @@ class WorkspaceElement extends HTMLElement
 
   createdCallback: ->
     @subscriptions = new CompositeDisposable
-    @initializeGlobalTextEditorStyleSheet()
     @initializeContent()
     @observeScrollbarStyle()
     @observeTextEditorFontConfig()
-    @createSpacePenShim()
+    @createSpacePenShim() if Grim.includeDeprecatedAPIs
 
   attachedCallback: ->
-    callAttachHooks(this)
+    callAttachHooks(this) if Grim.includeDeprecatedAPIs
     @focus()
 
   detachedCallback: ->
+    @subscriptions.dispose()
     @model.destroy()
-
-  initializeGlobalTextEditorStyleSheet: ->
-    atom.styles.addStyleSheet('atom-text-editor {}', sourcePath: 'global-text-editor-styles')
-    @globalTextEditorStyleSheet = document.head.querySelector('style[source-path="global-text-editor-styles"]').sheet
 
   initializeContent: ->
     @classList.add 'workspace'
@@ -43,7 +39,7 @@ class WorkspaceElement extends HTMLElement
     @appendChild(@horizontalAxis)
 
   observeScrollbarStyle: ->
-    @subscriptions.add scrollbarStyle.onValue (style) =>
+    @subscriptions.add scrollbarStyle.observePreferredScrollbarStyle (style) =>
       switch style
         when 'legacy'
           @classList.remove('scrollbars-visible-when-scrolling')
@@ -53,46 +49,52 @@ class WorkspaceElement extends HTMLElement
           @classList.add("scrollbars-visible-when-scrolling")
 
   observeTextEditorFontConfig: ->
-    @subscriptions.add atom.config.observe 'editor.fontSize', @setTextEditorFontSize.bind(this)
-    @subscriptions.add atom.config.observe 'editor.fontFamily', @setTextEditorFontFamily.bind(this)
-    @subscriptions.add atom.config.observe 'editor.lineHeight', @setTextEditorLineHeight.bind(this)
+    @updateGlobalTextEditorStyleSheet()
+    @subscriptions.add atom.config.onDidChange 'editor.fontSize', @updateGlobalTextEditorStyleSheet.bind(this)
+    @subscriptions.add atom.config.onDidChange 'editor.fontFamily', @updateGlobalTextEditorStyleSheet.bind(this)
+    @subscriptions.add atom.config.onDidChange 'editor.lineHeight', @updateGlobalTextEditorStyleSheet.bind(this)
+
+  updateGlobalTextEditorStyleSheet: ->
+    styleSheetSource = """
+      atom-text-editor {
+        font-size: #{atom.config.get('editor.fontSize')}px;
+        font-family: #{atom.config.get('editor.fontFamily')};
+        line-height: #{atom.config.get('editor.lineHeight')};
+      }
+    """
+    atom.styles.addStyleSheet(styleSheetSource, sourcePath: 'global-text-editor-styles')
 
   createSpacePenShim: ->
     WorkspaceView ?= require './workspace-view'
     @__spacePenView = new WorkspaceView(this)
 
-  getModel: -> @model
-
-  setModel: (@model) ->
-    @paneContainer = @model.getView(@model.paneContainer)
+  initialize: (@model) ->
+    @paneContainer = atom.views.getView(@model.paneContainer)
     @verticalAxis.appendChild(@paneContainer)
-
     @addEventListener 'focus', @handleFocus.bind(this)
-    handleWindowFocus = @handleWindowFocus.bind(this)
-    window.addEventListener 'focus', handleWindowFocus
-    @subscriptions.add(new Disposable -> window.removeEventListener 'focus', handleWindowFocus)
 
-    @__spacePenView.setModel(@model)
+    @panelContainers =
+      top: atom.views.getView(@model.panelContainers.top)
+      left: atom.views.getView(@model.panelContainers.left)
+      right: atom.views.getView(@model.panelContainers.right)
+      bottom: atom.views.getView(@model.panelContainers.bottom)
+      modal: atom.views.getView(@model.panelContainers.modal)
 
-  setTextEditorFontSize: (fontSize) ->
-    @updateGlobalEditorStyle('font-size', fontSize + 'px')
+    @horizontalAxis.insertBefore(@panelContainers.left, @verticalAxis)
+    @horizontalAxis.appendChild(@panelContainers.right)
 
-  setTextEditorFontFamily: (fontFamily) ->
-    @updateGlobalEditorStyle('font-family', fontFamily)
+    @verticalAxis.insertBefore(@panelContainers.top, @paneContainer)
+    @verticalAxis.appendChild(@panelContainers.bottom)
 
-  setTextEditorLineHeight: (lineHeight) ->
-    @updateGlobalEditorStyle('line-height', lineHeight)
+    @appendChild(@panelContainers.modal)
 
-  updateGlobalEditorStyle: (property, value) ->
-    editorRule = @globalTextEditorStyleSheet.cssRules[0]
-    editorRule.style[property] = value
-    atom.themes.emitter.emit 'did-update-stylesheet', @globalTextEditorStyleSheet
+    @__spacePenView.setModel(@model) if Grim.includeDeprecatedAPIs
+    this
+
+  getModel: -> @model
 
   handleFocus: (event) ->
     @model.getActivePane().activate()
-
-  handleWindowFocus: (event) ->
-    @handleFocus(event) if document.activeElement is document.body
 
   focusPaneViewAbove: -> @paneContainer.focusPaneViewAbove()
 
@@ -102,6 +104,13 @@ class WorkspaceElement extends HTMLElement
 
   focusPaneViewOnRight: -> @paneContainer.focusPaneViewOnRight()
 
+  runPackageSpecs: ->
+    if activePath = atom.workspace.getActivePaneItem()?.getPath?()
+      [projectPath] = atom.project.relativizePath(activePath)
+    else
+      [projectPath] = atom.project.getPaths()
+    ipc.send('run-package-specs', path.join(projectPath, 'spec')) if projectPath
+
 atom.commands.add 'atom-workspace',
   'window:increase-font-size': -> @getModel().increaseFontSize()
   'window:decrease-font-size': -> @getModel().decreaseFontSize()
@@ -109,6 +118,7 @@ atom.commands.add 'atom-workspace',
   'application:about': -> ipc.send('command', 'application:about')
   'application:run-all-specs': -> ipc.send('command', 'application:run-all-specs')
   'application:run-benchmarks': -> ipc.send('command', 'application:run-benchmarks')
+  'application:show-preferences': -> ipc.send('command', 'application:show-settings')
   'application:show-settings': -> ipc.send('command', 'application:show-settings')
   'application:quit': -> ipc.send('command', 'application:quit')
   'application:hide': -> ipc.send('command', 'application:hide')
@@ -122,6 +132,7 @@ atom.commands.add 'atom-workspace',
   'application:open-folder': -> ipc.send('command', 'application:open-folder')
   'application:open-dev': -> ipc.send('command', 'application:open-dev')
   'application:open-safe': -> ipc.send('command', 'application:open-safe')
+  'application:add-project-folder': -> atom.addProjectFolder()
   'application:minimize': -> ipc.send('command', 'application:minimize')
   'application:zoom': -> ipc.send('command', 'application:zoom')
   'application:bring-all-windows-to-front': -> ipc.send('command', 'application:bring-all-windows-to-front')
@@ -131,7 +142,7 @@ atom.commands.add 'atom-workspace',
   'application:open-your-snippets': -> ipc.send('command', 'application:open-your-snippets')
   'application:open-your-stylesheet': -> ipc.send('command', 'application:open-your-stylesheet')
   'application:open-license': -> @getModel().openLicense()
-  'window:run-package-specs': -> ipc.send('run-package-specs', path.join(atom.project.getPath(), 'spec'))
+  'window:run-package-specs': -> @runPackageSpecs()
   'window:focus-next-pane': -> @getModel().activateNextPane()
   'window:focus-previous-pane': -> @getModel().activatePreviousPane()
   'window:focus-pane-above': -> @focusPaneViewAbove()
@@ -139,9 +150,9 @@ atom.commands.add 'atom-workspace',
   'window:focus-pane-on-left': -> @focusPaneViewOnLeft()
   'window:focus-pane-on-right': -> @focusPaneViewOnRight()
   'window:save-all': -> @getModel().saveAll()
-  'window:toggle-invisibles': -> atom.config.toggle("editor.showInvisibles")
-  'window:log-deprecation-warnings': -> Grim.logDeprecationWarnings()
-  'window:toggle-auto-indent': -> atom.config.toggle("editor.autoIndent")
+  'window:toggle-invisibles': -> atom.config.set("editor.showInvisibles", not atom.config.get("editor.showInvisibles"))
+  'window:log-deprecation-warnings': -> Grim.logDeprecations()
+  'window:toggle-auto-indent': -> atom.config.set("editor.autoIndent", not atom.config.get("editor.autoIndent"))
   'pane:reopen-closed-item': -> @getModel().reopenItem()
   'core:close': -> @getModel().destroyActivePaneItemOrEmptyPane()
   'core:save': -> @getModel().saveActivePaneItem()
